@@ -1,6 +1,5 @@
 # bench_vis_profiles.py - Assistente com múltiplos perfis de personalidade
-# Instale: pip install pollinations-client pyttsx3 speechrecognition pillow requests
-
+# Instale: pip install pollinations-client pyttsx3 speechrecognition request PyAudio
 import pyttsx3
 import speech_recognition as sr
 import datetime
@@ -11,18 +10,19 @@ import pickle
 import sqlite3
 import threading
 import time
-import subprocess
-import tempfile
 import re
 import requests
 import urllib.parse
 import hashlib
 import shutil
+import tempfile
+import subprocess
 from collections import deque
 from pollinations import Pollinations
-from PIL import Image
+from gtts import gTTS
 
 class AssistenteMultiperfil:
+
     def __init__(self, nome="BENCH-VIS", modo_entrada="hibrido", perfil_inicial="bancada"):
         self.nome = nome
         self.apelido = "Vis"
@@ -114,10 +114,6 @@ class AssistenteMultiperfil:
         # Contexto da conversa (será recriado ao mudar de perfil)
         self.contexto_conversa = self.criar_contexto_inicial()
 
-        # === VOZ ===
-        self.engine = pyttsx3.init()
-        self.configurar_voz()
-
         # === ÁUDIO ===
         if self.modo_entrada in ["voz", "hibrido"]:
             self.setup_microfone()
@@ -130,14 +126,24 @@ class AssistenteMultiperfil:
 ╔══════════════════════════════════════╗
 ║     🔧 {self.nome} - Multiperfil      ║
 ║   Modo: {self.modo_entrada.upper()}                ║
+║   Voz: gTTS + players de terminal    ║
 ║   Perfil atual: {self.perfil_atual.upper()}        ║
-║   IA: {'ATIVADA' if self.usar_ia else 'DESATIVADA'}  🧠           ║
-║   Digite 'perfis' para ver opções    ║
 ╚══════════════════════════════════════╝
         """)
 
         self.saudacao_inicial()
-
+    def setup_microfone(self):
+        """Configura o microfone para reconhecimento de voz"""
+        try:
+            self.recognizer = sr.Recognizer()
+            self.microphone = sr.Microphone()
+            with self.microphone as source:
+                print("🎤 Ajustando microfone...")
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("✅ Microfone configurado!")
+        except Exception as e:
+            print(f"⚠️ Microfone não disponível: {e}")
+            self.modo_entrada = "texto"
     # ---------- INICIALIZAÇÃO ----------
     def init_banco_dados(self):
         self.conn = sqlite3.connect('benchvis.db', check_same_thread=False)
@@ -221,27 +227,81 @@ Mantenha a personalidade consistente com o perfil atual.
 """
         return [{"role": "system", "content": prompt}]
 
-    def configurar_voz(self):
-        voices = self.engine.getProperty('voices')
-        for voice in voices:
-            if 'brazil' in voice.name.lower():
-                self.engine.setProperty('voice', voice.id)
-                break
-        self.engine.setProperty('rate', 180)
-        self.engine.setProperty('volume', 0.95)
-
-    def setup_microfone(self):
+    def _falar_gtts(self, texto, emocao='normal'):
+        """Versão sem pygame, usando players de terminal"""
+        import tempfile
+        import subprocess
+        import os
+        import shutil
+        from gtts import gTTS
+        
+        # Se for modo texto, não faz nada
+        if self.modo_entrada == "texto":
+            return True
+        
+        print(f"🔊 {texto}")  # Mostra no terminal enquanto processa
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+            temp_file = tmp.name
+        
         try:
-            self.recognizer = sr.Recognizer()
-            self.microphone = sr.Microphone()
-            with self.microphone as source:
-                print("Ajustando microfone...")
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
-            print("✅ Microfone configurado!")
+            # Gerar áudio com gTTS
+            slow = (emocao == 'triste' or emocao == 'cansado')
+            tts = gTTS(text=texto, lang='pt', slow=slow)
+            tts.save(temp_file)
+            
+            # Lista de players em ordem de preferência
+            players = [
+                ('ffplay', ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', temp_file]),
+                ('mpg123', ['mpg123', '-q', temp_file]),
+                ('mpv', ['mpv', '--no-video', '--quiet', temp_file]),
+                ('aplay', ['aplay', temp_file]),  # para sistemas sem mp3
+            ]
+            
+            # Tentar cada player
+            for player_name, cmd in players:
+                if shutil.which(player_name):
+                    try:
+                        subprocess.run(cmd, check=True, timeout=30, 
+                                    stdout=subprocess.DEVNULL, 
+                                    stderr=subprocess.DEVNULL)
+                        return True
+                    except:
+                        continue
+            
+            # Se não tiver player, pelo menos mostrou no terminal
+            return False
+            
         except Exception as e:
-            print(f"⚠️ Microfone não disponível: {e}")
-            self.modo_entrada = "texto"
-
+            print(f"⚠️ Erro no áudio: {e}")
+            return False
+        finally:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except:
+                pass
+    
+    def falar(self, texto):
+        """Método principal de fala"""
+        print(f"🤖 {self.nome} [{self.perfil_atual}]: {texto}")
+        
+        if self.modo_entrada == "texto":
+            return
+        
+        # Determinar emoção
+        emocao = 'normal'
+        if self.personalidade['humor'] > 70:
+            emocao = 'feliz'
+        elif self.personalidade['humor'] < 30:
+            emocao = 'triste'
+        elif self.personalidade['energia'] < 40:
+            emocao = 'cansado'
+        
+        # Tentar gTTS
+        if not self._falar_gtts(texto, emocao):
+            # Fallback: só mostrou no terminal mesmo
+            pass
     def saudacao_inicial(self):
         hora = datetime.datetime.now().hour
         if 5 <= hora < 12:
@@ -359,122 +419,6 @@ Mantenha a personalidade consistente com o perfil atual.
             VALUES (?, ?, ?, ?)
         ''', (projeto_id, componente, quantidade, obs))
         self.conn.commit()
-
-    # ---------- GERAÇÃO DE IMAGENS ----------
-    def gerar_imagem(self, descricao):
-        """
-        Gera imagem usando Pollinations com cache e múltiplas tentativas
-        """
-        try:
-            print(f"🎨 Gerando imagem: '{descricao}'...")
-            import requests
-            from datetime import datetime
-            import urllib.parse
-            import time
-            import hashlib
-            import os
-
-            # Criar cache
-            if not os.path.exists('cache_imagens'):
-                os.makedirs('cache_imagens')
-
-            # Hash da descrição para cache
-            hash_desc = hashlib.md5(descricao.encode()).hexdigest()
-            cache_file = f"cache_imagens/{hash_desc}.png"
-
-            # Se já existir no cache, usar
-            if os.path.exists(cache_file):
-                print("📦 Imagem encontrada no cache!")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                nome_base = re.sub(r'[^\w\s-]', '', descricao)[:30]
-                nome_base = re.sub(r'[-\s]+', '_', nome_base)
-                filename = f"imagem_{timestamp}_{nome_base}.png"
-                shutil.copy2(cache_file, filename)
-                print(f"✅ Imagem copiada do cache: {filename}")
-
-                # Abrir
-                try:
-                    Image.open(filename).show()
-                except:
-                    pass
-                return filename
-
-            descricao_codificada = urllib.parse.quote(descricao)
-
-            # Lista de variações de URL para tentar
-            urls_tentar = [
-                f"https://image.pollinations.ai/prompt/{descricao_codificada}?width=1024&height=768&model=flux&nologo=true",
-                f"https://image.pollinations.ai/prompt/{descricao_codificada}",
-                f"https://image.pollinations.ai/prompt/{descricao_codificada}?model=stable-diffusion",
-                f"https://image.pollinations.ai/prompt/{descricao_codificada}?width=512&height=512",
-            ]
-
-            for i, url in enumerate(urls_tentar):
-                try:
-                    print(f"🖼️  Tentativa {i+1}/{len(urls_tentar)}...")
-                    response = requests.get(url, timeout=60)
-
-                    if response.status_code == 200:
-                        content_type = response.headers.get('content-type', '')
-                        if 'image' in content_type or response.content[:4] in [b'\x89PNG', b'\xff\xd8']:
-                            # É imagem válida
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            nome_base = re.sub(r'[^\w\s-]', '', descricao)[:30]
-                            nome_base = re.sub(r'[-\s]+', '_', nome_base)
-                            filename = f"imagem_{timestamp}_{nome_base}.png"
-
-                            with open(filename, 'wb') as f:
-                                f.write(response.content)
-
-                            print(f"✅ Imagem salva como: {filename} ({len(response.content)} bytes)")
-
-                            # Salvar no cache
-                            shutil.copy2(filename, cache_file)
-                            print("💾 Imagem salva no cache")
-
-                            # Abrir
-                            try:
-                                Image.open(filename).show()
-                            except:
-                                pass
-
-                            return filename
-                        else:
-                            print(f"⚠️ Resposta não é imagem, tentando próxima...")
-                    else:
-                        print(f"⚠️ Status {response.status_code}, tentando próxima...")
-
-                except requests.exceptions.Timeout:
-                    print(f"⏱️ Timeout na tentativa {i+1}, continuando...")
-                except Exception as e:
-                    print(f"⚠️ Erro na tentativa {i+1}: {e}")
-
-                time.sleep(2)
-
-            # Se todas falharem, descrever a imagem via IA
-            print("⚠️ Todas as tentativas falharam. Descrevendo a imagem com IA...")
-            prompt_desc = f"""Descreva em detalhes como seria uma imagem de: {descricao}. 
-            Seja criativo e vívido na descrição, como se estivesse contando para alguém que não pode ver."""
-            try:
-                resposta = self.client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt_desc}],
-                    model=self.modelo_padrao,
-                    temperature=0.8
-                )
-                desc_imaginaria = resposta.choices[0].message.content
-                print("\n" + "="*50)
-                print("🎨 IMAGEM (descrita pela IA):")
-                print("="*50)
-                print(desc_imaginaria)
-                print("="*50 + "\n")
-                self.falar("Não consegui gerar a imagem, mas descrevi como seria. Dá uma olhada no terminal!")
-            except:
-                self.falar("Não consegui gerar a imagem agora. Tenta de novo mais tarde!")
-            return None
-
-        except Exception as e:
-            print(f"❌ Erro geral: {e}")
-            return None
 
     # ---------- ENTRETENIMENTO ----------
     def fato_aleatorio(self):
@@ -642,15 +586,6 @@ Mantenha a personalidade consistente com o perfil atual.
                     time.sleep(0.5)
                     print(".", end="", flush=True)
                 print()
-                caminho = self.gerar_imagem(desc)
-                if caminho:
-                    self.falar(f"Imagem salva como {caminho}. Dá uma olhada!")
-                else:
-                    self.falar("Não consegui gerar a imagem agora. Tenta de novo mais tarde!")
-            else:
-                self.falar("Descreva a imagem que deseja. Ex: 'gerar imagem um robô soldando'")
-            return
-
         # ---------- ENTRETENIMENTO ----------
         elif comando in ['fato', 'curiosidade']:
             fato = self.fato_aleatorio()
@@ -833,9 +768,6 @@ Mantenha a personalidade consistente com o perfil atual.
   • "listar projetos" - lista todos
   • "deletar projeto ID" - remove projeto (com confirmação)
   • "componentes do projeto ID" - lista componentes do projeto
-
-🎨 IMAGENS:
-  • "gerar imagem [descrição]" - cria imagem com IA e salva
 
 💻 CÓDIGO:
   • "gerar codigo [descrição]" - gera código (Arduino, Python...)
